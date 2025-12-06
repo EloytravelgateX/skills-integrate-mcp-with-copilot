@@ -5,19 +5,42 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Cookie, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 import os
+import json
+import secrets
 from pathlib import Path
+from typing import Optional
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+
+# Session storage (in-memory for simplicity)
+sessions = {}
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# Helper function to load teachers from JSON file
+def load_teachers():
+    teachers_file = Path(__file__).parent / "teachers.json"
+    with open(teachers_file, 'r') as f:
+        return json.load(f)["teachers"]
+
+# Helper function to verify if user is authenticated
+def verify_auth(session_token: Optional[str] = Cookie(None)):
+    if not session_token or session_token not in sessions:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return sessions[session_token]
 
 # In-memory activity database
 activities = {
@@ -83,14 +106,47 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
+@app.post("/login")
+def login(credentials: LoginRequest, response: Response):
+    """Login endpoint for teachers"""
+    teachers = load_teachers()
+    
+    for teacher in teachers:
+        if teacher["username"] == credentials.username and teacher["password"] == credentials.password:
+            # Create session token
+            session_token = secrets.token_urlsafe(32)
+            sessions[session_token] = credentials.username
+            
+            # Set cookie
+            response.set_cookie(key="session_token", value=session_token, httponly=True, max_age=3600)
+            return {"message": "Login successful", "username": credentials.username}
+    
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+@app.post("/logout")
+def logout(response: Response, session_token: Optional[str] = Cookie(None)):
+    """Logout endpoint"""
+    if session_token and session_token in sessions:
+        del sessions[session_token]
+    
+    response.delete_cookie(key="session_token")
+    return {"message": "Logout successful"}
+
+@app.get("/auth/status")
+def auth_status(session_token: Optional[str] = Cookie(None)):
+    """Check authentication status"""
+    if session_token and session_token in sessions:
+        return {"authenticated": True, "username": sessions[session_token]}
+    return {"authenticated": False}
+
 @app.get("/activities")
 def get_activities():
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
+def signup_for_activity(activity_name: str, email: str, user: str = Depends(verify_auth)):
+    """Sign up a student for an activity (teacher authentication required)"""
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +167,8 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
+def unregister_from_activity(activity_name: str, email: str, user: str = Depends(verify_auth)):
+    """Unregister a student from an activity (teacher authentication required)"""
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
